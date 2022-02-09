@@ -1,0 +1,238 @@
+========================================================================SQL DB=========================================================
+DROP TABLE IF EXISTS `creditcard`;
+CREATE TABLE `creditcard` (
+`ccid` int primary key NOT NULL AUTO_INCREMENT,
+`cc_number` char(30) NOT NULL,
+`user_id` int NOT NULL,
+`maximum_credit` int NOT NULL,
+`outstanding_bal` int NOT NULL,
+`due_date` date NOT NULL,
+`issuingbank` CHAR(100) NOT NULL,
+created_on TIMESTAMP
+);
+
+DROP PROCEDURE insert_test_data;
+
+DELIMITER $
+CREATE PROCEDURE insert_test_data()
+BEGIN
+DECLARE i INT DEFAULT 1000;
+WHILE i < 2000 DO
+
+INSERT INTO `creditcard`(
+`cc_number`
+,`user_id`
+,`maximum_credit`
+,`outstanding_bal`
+,`due_date`
+, issuingbank
+)
+VALUES(
+concat(convert(floor(rand()*10000),char),convert(floor(rand()*10000),char),convert(floor(rand()*10000),char),convert(floor(rand()*10000),char))
+,floor(rand()*1000)
+,rand()*10000
+,rand()*10000
+,TIMESTAMP('2019-10-01 00:53:27')-INTERVAL RAND()*365 DAY
+,'MYBANK'
+);
+
+SET i = i + 1;
+END WHILE;
+
+
+END$$
+DELIMITER ;
+call insert_test_data();
+update creditcard set issuingbank = 'YOURBANK' where ccid < (300);
+update creditcard set issuingbank = 'OURBANK' where ccid > (600);
+
+==========
+
+===============================================================Sqoop job (from sql to hdfs) ==============================================
+
+sqoop job --create BankProject \
+-- import --username root --password cloudera \
+--connect jdbc:mysql://localhost/Bank \
+--direct --table creditcard -m 1 --incremental append \
+--check-column created_on --target-dir Project_cc;
+
+sqoop job --exec BankProject
+
+=============================================================creating managed table in hive============================================
+
+CREATE DATABASE bankproject;
+
+
+set hive.cli.print.current.db = true;
+DROP TABLE creditcard;
+CREATE TABLE creditcard (
+ccid int ,
+cc_number string,
+user_id int,
+maximum_credit int,
+outstanding_bal int,
+due_date date ,
+issuingbank string,
+created_on timestamp
+)
+ROW FORMAT DELIMITED 
+FIELDS TERMINATED BY ',';
+LOAD DATA  INPATH '/user/cloudera/Project_cc/part-m-00000' INTO TABLE creditcard;
+
+============================================================creating another managed table with partition===================================
+CREATE FUNCTION Encrypt_text AS 'EncryptText'
+
+USING JAR 'hdfs://localhost:8020/user/cloudera/encdec.jar';
+
+CREATE FUNCTION Decrypt_text AS 'DecryptText'
+
+USING JAR 'hdfs://localhost:8020/user/cloudera/encdec.jar';
+
+CREATE FUNCTION Evaluate_text AS 'HadoopProject.DisplayFormat'
+
+USING JAR 'hdfs://localhost:8020/user/cloudera/HadoopProject.jar';
+
+CREATE FUNCTION Auto_inc AS 'AutoInc'
+
+USING JAR 'hdfs://localhost:8020/user/cloudera/AutoIncrement.jar';
+
+
+
+
+SET hive.exec.dynamic.partition.mode = nonstrict;
+DROP TABLE creditcard_ext;
+CREATE TABLE creditcard_ext (
+day_id int,
+cc_number string,
+user_id int,
+maximum_credit int,
+outstanding_bal int,
+due_date date)
+PARTITIONED BY(`issuingbank` string);
+INSERT OVERWRITE TABLE creditcard_ext PARTITION(issuingbank)
+SELECT ccid,Encrypt_text(cc_number),user_id,maximum_credit, outstanding_bal,due_date,issuingbank FROM creditcard;
+
+
+=======================================CREATING EXTERNAL TABLE AFTER THE PARTITIONED TABLE IN ORC FORMAT======================
+SET hive.exec.compress.output=true;
+SET mapred.output.compression.codec=org.apache.hadoop.io.compress.SnappyCodec;
+SET mapred.output.compression.type=BLOCK;
+
+CREATE EXTERNAL TABLE cc_external 
+(day_id int,
+cc_number string,
+user_id int,
+maximum_credit int,
+outstanding_bal int,
+due_date date,
+issuingbank string
+)
+STORED AS ORC;
+FROM creditcard_ext
+INSERT INTO TABLE cc_external SELECT *;
+=======================================CREATING TABLE 2 (file in xml format)==================================================================
+
+add jar file://///home/cloudera/Desktop/Project_1/hivexmlserde-1.0.5.3.jar
+hdfs dfs -put /home/cloudera/Desktop/Project_1/hivexmlserde-1.0.5.3.jar ./Project_cc;
+
+CREATE EXTERNAL TABLE bankinfo(
+
+       name string,
+       location string,
+       totcustomers int,
+       state string
+      
+
+     )
+
+     ROW FORMAT SERDE 'com.ibm.spss.hive.serde2.xml.XmlSerDe'
+
+     WITH SERDEPROPERTIES (
+
+     "column.xpath.name"="/bank/name/text()",
+     "column.xpath.location"="/bank/location/text()",
+     "column.xpath.totcustomers"="/bank/totcustomers/text()",
+     "column.xpath.state"="/bank/state/text()"
+  
+
+     )
+
+     STORED AS
+
+     INPUTFORMAT 'com.ibm.spss.hive.serde2.xml.XmlInputFormat'
+
+     OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.IgnoreKeyTextOutputFormat'
+
+     LOCATION '/user/cloudera/Project_cc'
+
+     TBLPROPERTIES (
+
+     "xmlinput.start"="<bank>","xmlinput.end"="</bank>"
+
+     );
+
+
+
+======================================================CREATING TABLE 2 in ORC Format===========================================
+SET hive.exec.compress.output=true;
+SET mapred.output.compression.codec=org.apache.hadoop.io.compress.SnappyCodec;
+SET mapred.output.compression.type=BLOCK;
+
+CREATE EXTERNAL TABLE bankinfo_external(
+
+       name string,
+       location string,
+       totcustomers int,
+       state string
+      )
+
+
+STORED AS ORC;
+FROM bankinfo
+INSERT OVERWRITE TABLE bankinfo_external SELECT *;
+==================================================================================================================================
+
+1. Find out the userid with the highest outstanding balance for each bank.  Also, pull the credit card number while displaying the customer id.
+2. Find out the userid with the highest maximum credit in each state.  Also, pull the credit card number while displaying the customer id.
+3. For all creditcards whose due_date is in the year 2019, generate a report with the creditcardnumber, userid, issuingbank and its location.  This report should be stored in a table in mysql database.
+
+Ans1. 
+SELECT a.user_id,Evaluate_text(decrypt_text(a.cc_number)) FROM
+cc_external a 
+WHERE a.outstanding_bal IN 
+(select max(b.outstanding_bal) FROM cc_external b group by b.issuingbank);
+
+Ans2. 
+SELECT a.user_id,Evaluate_text(decrypt_text(a.cc_number)) FROM cc_external a WHERE a.maximum_credit IN
+(SELECT MAX(c.maximum_credit) FROM cc_external c JOIN bankinfo_external b ON c.issuingbank = b.name
+GROUP BY b.state);
+
+
+Ans3.
+CREATE TABLE report
+ROW FORMAT DELIMITED 
+FIELDS TERMINATED BY ','
+AS SELECT Evaluate_text(Decrypt_text(cc_number)), user_id,issuingbank,
+location FROM creditcard_ext
+INNER JOIN bankinfo_external ON 
+creditcard_ext.issuingbank = bankinfo_external.name
+WHERE date_format (due_date,'yyyy')='2019';
+insert overwrite table report select distinct * from report;
+
+======================================================sqoop export=======================================================================
+/*creating table in mysql
+CREATE TABLE report_mysql 
+(cc_number CHAR(30),
+user_id INT,
+issuing_bank CHAR(30),
+location CHAR(20));
+
+/* sqoop export cmd
+sqoop export --username root --password cloudera --connect jdbc:mysql://localhost/Bank -m 1 --table report_mysql --export-dir /user/hive/warehouse/bankproject.db/report --input-fields-terminated-by ','
+
+
+==========================================================CRONTAB=====================================================================
+
+
+
+

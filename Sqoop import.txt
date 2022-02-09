@@ -1,0 +1,8 @@
+
+sqoop job --create BankProject \
+-- import --username root --password cloudera \
+--connect jdbc:mysql://localhost/Bank \
+--direct --table creditcard -m 1 --incremental append \
+--check-column created_on --target-dir Project_cc;
+
+sqoop job --exec BankProject
